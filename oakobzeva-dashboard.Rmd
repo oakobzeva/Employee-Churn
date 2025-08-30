@@ -1,0 +1,162 @@
+---
+title: "Отток сотрудников компании"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+---
+ 
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(ggplot2)
+library(DBI)
+library(RSQLite)
+library(dplyr)
+library(plotly)
+library(crosstalk)
+library(partykit)
+library(caret)
+
+con <- dbConnect(ClickHouseHTTP::ClickHouseHTTP(), 
+                 user='studentminor', 
+                 password='DataMinorHSE!2023', 
+                 dbname='employee', 
+                 host='rc1a-i6ui9dhblsq8rgdo.mdb.yandexcloud.net',
+                 port = 8443,
+                 https=TRUE,
+                 ssl_verifypeer=FALSE)
+```
+
+
+ 
+Column {data-width=500}
+-----------------------------------------------------------------------
+
+### Общие данные
+
+```{r}
+#Построим график по возрасту и годам работы
+
+data2 = dbGetQuery(con, 'SELECT Age, YearsAtCompany, JobSatisfaction, Attrition FROM profile INNER JOIN portfolio ON profile.EmployeeNumber = portfolio.EmployeeNumber')
+
+
+sharedData <- SharedData$new(data2)
+# расположим по столбцам -- оборачиваем в функцию bscols()
+bscols(
+  widths = c(3,NA), # как расположим элементы (всего 8 колонок, 3 из них занимает фильтр)
+  filter_select("status", # id элемента, понадобится, если будем потом к нему обращаться
+                "Ушел или нет", # название элемента, которое отображается в интерфейсе
+                sharedData, # совместно используемые данные, созданные выше
+                ~Attrition, # из какой переменной взяты значения для фильтра
+                multiple = FALSE), # нужен ли множественный выбор в элементе
+  plot_ly(sharedData, 
+        x = ~Age, y = ~YearsAtCompany, color = ~JobSatisfaction,
+        colors = c("#CDCD00", "#CD4F39", "#CD8500", "#7CCD7C"),
+        type = "scatter") |>
+        layout(xaxis = list(title = "Возраст"), yaxis = list(title = "Стаж в компании"))
+)
+
+
+```
+
+
+### Доля оттока среди всех сотрудников
+
+```{r}
+s = 0.17
+
+valueBox(s, icon = "fas fa-chart-pie", color = "danger")
+```
+
+
+### Доля оттока среди молодых сотрудников
+
+```{r}
+s = 0.27
+
+valueBox(s, icon = "fas fa-chart-pie", color = "danger")
+
+data = dbGetQuery(con, "SELECT Attrition, COUNT(*) AS n FROM portfolio GROUP BY Attrition")
+data$Attrition = as.factor(data$Attrition)
+
+
+
+data_young = dbGetQuery(con, "SELECT * FROM profile INNER JOIN portfolio ON profile.EmployeeNumber = portfolio.EmployeeNumber
+                  WHERE (Age <= 35 AND YearsAtCompany <= 7)")
+
+data_young_att = dbGetQuery(con, "SELECT Attrition, COUNT(*) AS m FROM profile INNER JOIN portfolio ON profile.EmployeeNumber = portfolio.EmployeeNumber
+                  WHERE (Age <= 35 AND YearsAtCompany <= 7)
+                  GROUP BY Attrition")
+
+data_young_att$Attrition = as.factor(data_young_att$Attrition)
+
+
+
+
+
+
+
+
+
+```
+
+
+Column {data-width=300}
+-----------------------------------------------------------------------
+
+
+### предполагаемое уменьшение доли оттока в тестовой выборке
+
+```{r}
+
+s = 'С 0.27 до 0.14'
+valueBox(s, icon = "fa-arrow-alt-circle-down", color = "success")
+
+```
+
+
+
+
+### После проведения симуляции
+
+```{r}
+
+dbDisconnect(con)
+
+data_young = data_young %>% mutate_if(is.character, as.factor)
+data_young$Attrition = as.factor(data_young$Attrition)
+
+data_young = select(data_young, -EmployeeNumber)
+
+
+set.seed(7777) #Тестовая и обучающая выборка
+data_young.ind = createDataPartition(data_young$Attrition, p = 0.75, list = F, times = 1)
+data_young.train = data_young[data_young.ind,]
+data_young.test = data_young[-data_young.ind,]
+
+
+treemodel = ctree(Attrition~., data = data_young.train)
+#plot(treemodel)
+predTest = predict(treemodel, data_young.test)
+#confusionMatrix(predTest, data_young.test$Attrition)
+
+data_young.test2 = data_young.test
+
+
+set.seed(1111)
+data_young.test2$OverTime[data_young.test2$OverTime == "Yes"] = 
+  sample(c("Yes", "No"), 
+         size = length(data_young.test2$OverTime[data_young.test2$OverTime == "Yes"]),
+         replace = T, prob = c(0.8, 0.2))
+
+predTest2 = predict(treemodel, data_young.test2)
+data_young.test2$pred2 = predTest2
+
+p = ggplot(data_young.test2) + geom_bar(aes(x = predTest2), alpha = 0.5, fill = "red") +
+  geom_bar(aes(x = Attrition), alpha = 0.5) 
+
+ggplotly(p)   |>
+        layout(xaxis = list(title = "Отток"), yaxis = list(title = "Количество"))
+
+
+
+```

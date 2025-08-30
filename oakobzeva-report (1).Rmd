@@ -1,0 +1,199 @@
+---
+title: 'Проект SQL: отток сотрудников из компании'
+author: "Кобзева Ольга, oakobzeva"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+## Задача
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+library(plotly)
+library(crosstalk)
+library(DBI)
+library(ggplot2)
+library(partykit)
+library(caret)
+
+
+```
+
+Увольнение сотрудника из компании влечёт за собой некоторые издержки со стороны компании: нужно искать замену на освободившееся место, нужно будет обучить новичка, также уменьшается привлекательность работы в данной компании (если из компании увольняется большое количество людей, то меньшее количество потенциальных сотрудников желает туда попасть). Поэтому компании выгоден стабильный рабочий состав. Представим, что к нам обратилась одна из компаний, желающая уменьшить текучку кадров. Наша задача -- исследовать причины, по которым сотрудники оставляют работу в данной компании и предложить некоторые меры, которые эта компания может предпринять, чтобы добиться поставленной цели.  
+
+## Анализ
+
+### Данные и логика анализа
+Подключимся к базе данных о сотрудниках компании, которую заказчик нам предоставил.
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library(DBI)
+con <- dbConnect(ClickHouseHTTP::ClickHouseHTTP(), 
+                 user='studentminor', 
+                 password='DataMinorHSE!2023', 
+                 dbname='employee', 
+                 host='rc1a-i6ui9dhblsq8rgdo.mdb.yandexcloud.net',
+                 port = 8443,
+                 https=TRUE,
+                 ssl_verifypeer=FALSE)
+#dbListTables(con)
+
+```
+
+Посмотрим, как именно распределяются все сотрудники и, в частности, те, кто ушёл, по возрасту, стажу в компании и удовлетворённости работой.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+data2 = dbGetQuery(con, 'SELECT Age, YearsAtCompany, JobSatisfaction, Attrition FROM profile INNER JOIN portfolio ON profile.EmployeeNumber = portfolio.EmployeeNumber')
+
+library(plotly)
+library(crosstalk)
+sharedData <- SharedData$new(data2)
+# расположим по столбцам -- оборачиваем в функцию bscols()
+bscols(
+  widths = c(3,NA), # как расположим элементы (всего 8 колонок, 3 из них занимает фильтр)
+  filter_select("status", # id элемента, понадобится, если будем потом к нему обращаться
+                "Ушел или нет", # название элемента, которое отображается в интерфейсе
+                sharedData, # совместно используемые данные, созданные выше
+                ~Attrition, # из какой переменной взяты значения для фильтра
+                multiple = FALSE), # нужен ли множественный выбор в элементе
+  plot_ly(sharedData, 
+        x = ~Age, y = ~YearsAtCompany, color = ~JobSatisfaction,
+        colors = c("#CDCD00", "#CD4F39", "#CD8500", "#7CCD7C"),
+        type = "scatter")  |>
+        layout(xaxis = list(title = "Возраст"), yaxis = list(title = "Стаж в компании"))
+)
+```
+
+\n
+
+Видим, что в основном в компании работают сотрудники со стажем в данной компании меньше 10 лет, а уходят в основном сотрудники со стажем меньше 10 лет и возрастом меньше 35 лет. Кстати, мы не можем сказать, что уходят в основном те, кто не удовлетворён работой: среди тех, кто ушёл, немало тех, кто оценивал свою удовлетворённость как очень высокую и высокую. То есть график для тех, кто ушёл, выглядит довольно разноцветно вместо ожидаемого преобладания синего и оранжевого цвета.
+
+В качестве целевого сегмента выберем молодых (возраст до 35 лет) людей, работающих в компании не более чем 7 лет. Теоретически, это самые потенциально полезные работники: молодые люди могут оставаться на переработке, они более мобильные, значит, смогут ездить в командировки, также они, как правило, более социальные и могут предложить новые идеи. Но также они с меньшим риском для себя могут сменить работу, поэтому удержать их труднее.
+
+Посмотрим на общий отток сотрудников и на отток в выбранном сегменте:
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+data = dbGetQuery(con, "SELECT Attrition, COUNT(*) AS n FROM portfolio GROUP BY Attrition")
+data$Attrition = as.factor(data$Attrition)
+
+data_young = dbGetQuery(con, "SELECT * FROM profile INNER JOIN portfolio ON profile.EmployeeNumber = portfolio.EmployeeNumber
+                  WHERE (Age <= 35 AND YearsAtCompany <= 7)")
+
+data_young_att = dbGetQuery(con, "SELECT Attrition, COUNT(*) AS m FROM profile INNER JOIN portfolio ON profile.EmployeeNumber = portfolio.EmployeeNumber
+                  WHERE (Age <= 35 AND YearsAtCompany <= 7)
+                  GROUP BY Attrition")
+
+data_young_att$Attrition = as.factor(data_young_att$Attrition)
+
+library(dplyr)
+att = inner_join(data, data_young_att, by = 'Attrition')
+
+g = ggplot(att) + geom_bar(aes(x = Attrition, y = n), stat = "identity", alpha = 0.5, fill = "red") + geom_bar(aes(x = Attrition, y = m), alpha = 0.5, fill = "blue", stat = "identity")
+
+ggplotly(g)   |>
+        layout(xaxis = list(title = "Отток"), yaxis = list(title = "Количество"))
+
+
+```
+
+Заметим, что здесь пропорции разные: доля тех, кто ушёл из компании, в выбранном сегменте (примерно 0.27) существенно выше, чем доля тех, кто ушёл из компании в целом (примерно 0.17). Поэтому далее будем работать с выбранной группой людей.
+
+Преобразуем переменные character в factor.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library(dplyr)
+data_young = dbGetQuery(con, "SELECT * FROM profile INNER JOIN portfolio ON profile.EmployeeNumber = portfolio.EmployeeNumber
+                  WHERE (Age <= 35 AND YearsAtCompany <= 7)")
+
+data_young = data_young %>% mutate_if(is.character, as.factor)
+data_young$Attrition = as.factor(data_young$Attrition)
+
+```
+
+### Модель
+
+Построим модель, позволяющую предсказывать, уйдёт сотрудник из компании или нет. Я решила построить дерево.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+data_young = select(data_young, -EmployeeNumber)
+
+set.seed(7777) #Тестовая и обучающая выборка
+data_young.ind = createDataPartition(data_young$Attrition, p = 0.75, list = F, times = 1)
+data_young.train = data_young[data_young.ind,]
+data_young.test = data_young[-data_young.ind,]
+
+
+treemodel = ctree(Attrition~., data = data_young.train)
+plot(treemodel)
+
+```
+
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+predTest = predict(treemodel, data_young.test)
+#confusionMatrix(predTest, data_young.test$Attrition)
+
+```
+Наша модель имеет точность примерно 0.74, что, в целом, неплохо, дальше будем её использовать.
+
+Посмотрим на важность переменных:
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library(vip)
+vip(treemodel)
+```
+
+\n
+Видим, что наибольшую роль в предсказании играет переменная OverTime, которая отвечает за то, есть ли переработки у сотрудника. Этот результат, в целом, ожидаем: молодых сотрудников проще вынудить работать сверхурочно. Ещё один аргумент: официальная зарплата может быть невелика, и молодым людям приходится работать дополнительно для получения дополнительных средств.
+
+### Симуляция
+ 
+Предположим, что была проведена кампания, в результате которой были снижены переработки у молодых людей. Симулируем это следующим образом: каждый молодой сотрудник, работающий сверурочно, с вероятностью 20% перестанет это делать.
+Посмотрим, как теперь, в соответствии с предсказанием нашей модели, будет распределён отток сотрудников, и сравним с тем, что имеем в тестовой выборке:
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+data_young.test2 = data_young.test
+
+set.seed(1111)
+data_young.test2$OverTime[data_young.test2$OverTime == "Yes"] = 
+  sample(c("Yes", "No"), 
+         size = length(data_young.test2$OverTime[data_young.test2$OverTime == "Yes"]),
+         replace = T, prob = c(0.80, 0.20))
+
+predTest2 = predict(treemodel, data_young.test2)
+data_young.test2$pred2 = predTest2
+
+p = ggplot(data_young.test2) + geom_bar(aes(x = predTest2), alpha = 0.5, fill = "red") +
+  geom_bar(aes(x = Attrition), alpha = 0.5) 
+
+ggplotly(p)   |>
+        layout(xaxis = list(title = "Отток"), yaxis = list(title = "Количество"))
+
+
+```
+
+Видим, что отток молодых сотрудников существенно уменьшился. Раньше доля тех, кто ушёл, составляла 0.27, а теперь составляет примерно 0.14. 
+
+
+
+### Дэшборд
+
+Данные для дэшборда я подбирала так, чтобы наиболее точно отразить основные моменты моего анализа. Я вынесла в дэшборд график, с помощью которого можно увидеть, что интересно рассматривать именно подгруппу молодых людей. Так же я указала долю ушедших среди всех сотрудников компании и долю ушедших только среди выделенного сегмента, чтобы можно было увидеть, насколько они отличаются. Затем я поместила в дэшборд интерактивный график, который показывает предполагаемый результат предложенной кампании, и также число, на которое уменьшилась доля ушедших, чтобы представить результат численно.
+Дэшборд будет полезен для представителей самой компании, чтобы увидеть внутреннюю ситуацию. Также он будет полезен для других подобных компаний, желающих уменьшить отток сотрудников. Информация в дэшборде представлена в доступной форме, так что почти всякий человек может разобраться в ситуации с его помощью. 
+
+## Общие выводы
+
+Мы исследовали ситуацию в компании относительно ухода из неё сотрудников. Увидели, что внимание стоит сосредоточить именно на подгруппе молодых и относительно недавно работающих в компании людей, вероятность для которых уйти из компании выше, чем та же вероятность в целом. Были обнаружены наиболее важные факторы, влияющие на уход людей из выбранного сегмента, и предложена кампания, которая ориентируется на самый важный из них. В результате наблюдаем предполагаемое существенное снижение оттока.
+
+```{r}
+dbDisconnect(con)
+
+```
+
+
+
+
+
+
